@@ -1,0 +1,264 @@
+openapi: 3.0.3
+info:
+  title: Salutia Inventory API
+  description: >
+    API de gestión de inventario farmacéutico para Salutia. Ejemplo docente de
+    arquitectura hexagonal en Node.js. Esta documentación permite probar todos
+    los endpoints directamente desde el navegador.
+  version: 1.0.0
+  contact:
+    name: Salutia
+servers:
+  - url: /api/v1
+    description: Servidor local (relativo a donde esté corriendo la API)
+
+tags:
+  - name: Productos
+    description: Gestión del inventario de productos farmacéuticos
+
+paths:
+  /products:
+    post:
+      tags: [Productos]
+      summary: Crear un nuevo producto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductInput'
+            examples:
+              paracetamol:
+                summary: Paracetamol 500mg
+                value:
+                  sku: PARA-500
+                  name: Paracetamol 500mg
+                  stock: 20
+                  minStock: 5
+                  requiresPrescription: false
+                  price: 3.5
+              amoxicilina:
+                summary: Amoxicilina (con receta)
+                value:
+                  sku: AMOX-500
+                  name: Amoxicilina 500mg
+                  stock: 15
+                  minStock: 5
+                  requiresPrescription: true
+                  price: 6.9
+      responses:
+        '201':
+          description: Producto creado correctamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          description: Payload inválido (falla de validación)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Ya existe un producto con ese SKU
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags: [Productos]
+      summary: Listar productos
+      parameters:
+        - name: belowMinimum
+          in: query
+          description: Si es "true", devuelve solo los productos por debajo de su stock mínimo
+          required: false
+          schema:
+            type: string
+            enum: ['true', 'false']
+      responses:
+        '200':
+          description: Listado de productos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+
+  /products/{id}:
+    get:
+      tags: [Productos]
+      summary: Obtener un producto por id
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: Producto encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          description: Producto no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Productos]
+      summary: Eliminar un producto
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '204':
+          description: Producto eliminado (sin contenido en la respuesta)
+        '404':
+          description: Producto no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /products/{id}/stock:
+    patch:
+      tags: [Productos]
+      summary: Ajustar el stock de un producto (entrada o salida de almacén)
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStockInput'
+            examples:
+              entrada:
+                summary: Entrada de almacén (+10 unidades)
+                value:
+                  operation: increase
+                  quantity: 10
+              salida:
+                summary: Salida de almacén (-5 unidades)
+                value:
+                  operation: decrease
+                  quantity: 5
+      responses:
+        '200':
+          description: Stock actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          description: Payload inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Producto no encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Operación de stock no válida (p. ej. retirar más de lo disponible)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      description: Identificador único del producto (UUID)
+      schema:
+        type: string
+
+  schemas:
+    Product:
+      type: object
+      properties:
+        id:
+          type: string
+          example: 3f1b1c9a-2e34-4b8a-9a0d-1234567890ab
+        sku:
+          type: string
+          example: PARA-500
+        name:
+          type: string
+          example: Paracetamol 500mg
+        stock:
+          type: integer
+          example: 20
+        minStock:
+          type: integer
+          example: 5
+        requiresPrescription:
+          type: boolean
+          example: false
+        price:
+          type: number
+          format: float
+          example: 3.5
+
+    CreateProductInput:
+      type: object
+      required: [sku, name, stock, price]
+      properties:
+        sku:
+          type: string
+          minLength: 3
+          maxLength: 30
+          example: PARA-500
+        name:
+          type: string
+          minLength: 2
+          maxLength: 120
+          example: Paracetamol 500mg
+        stock:
+          type: integer
+          minimum: 0
+          example: 20
+        minStock:
+          type: integer
+          minimum: 0
+          default: 0
+          example: 5
+        requiresPrescription:
+          type: boolean
+          default: false
+          example: false
+        price:
+          type: number
+          minimum: 0
+          example: 3.5
+
+    UpdateStockInput:
+      type: object
+      required: [operation, quantity]
+      properties:
+        operation:
+          type: string
+          enum: [increase, decrease]
+          example: increase
+        quantity:
+          type: integer
+          minimum: 1
+          example: 10
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: ProductNotFoundError
+        message:
+          type: string
+          example: Producto con id "xxx" no encontrado
