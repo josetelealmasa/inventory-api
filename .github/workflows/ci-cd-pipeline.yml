@@ -1,0 +1,253 @@
+# =============================================================================
+# PIPELINE CI/CD PARA APLICACIÓN NODE.JS EMPRESARIAL
+# =============================================================================
+# Ubicación real en un repo: .github/workflows/ci-cd-pipeline.yml
+# GitHub detecta automáticamente cualquier .yml dentro de .github/workflows/
+# y lo activa según los "triggers" (eventos) definidos abajo.
+# =============================================================================
+
+name: CI/CD Pipeline - Backend Node.js
+
+# -----------------------------------------------------------------------------
+# 1. TRIGGERS: cuándo se ejecuta el pipeline
+# -----------------------------------------------------------------------------
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:        # permite lanzarlo manualmente desde la UI de GitHub
+    inputs:
+      deploy_target:
+        description: 'Entorno destino'
+        required: true
+        default: 'staging'
+        type: choice
+        options: [staging, production]
+  schedule:
+    - cron: '0 3 * * 1'     # ejemplo: escaneo de seguridad semanal (lunes 3:00 UTC)
+
+# -----------------------------------------------------------------------------
+# 2. CONCURRENCIA: evita que dos ejecuciones sobre la misma rama se pisen
+# -----------------------------------------------------------------------------
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# -----------------------------------------------------------------------------
+# 3. PERMISOS: principio de mínimo privilegio para el GITHUB_TOKEN
+# -----------------------------------------------------------------------------
+permissions:
+  contents: read
+  security-events: write   # necesario para subir resultados de CodeQL
+  packages: write          # necesario si se publica imagen en GHCR
+
+# -----------------------------------------------------------------------------
+# 4. VARIABLES DE ENTORNO GLOBALES
+# -----------------------------------------------------------------------------
+env:
+  NODE_ENV: test
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+  # ===========================================================================
+  # JOB 1: LINT - Calidad de código estático
+  # ===========================================================================
+  lint:
+    name: Lint & Formato
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci     # ci en vez de install: reproducible, usa package-lock.json
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier (comprobación de formato)
+        run: npm run format:check
+
+  # ===========================================================================
+  # JOB 2: TEST - Matriz de versiones + cobertura
+  # ===========================================================================
+  test:
+    name: Tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['18', '20', '22']    # se ejecuta en paralelo en 3 versiones
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar tests unitarios e integración con cobertura
+        run: npm run test:coverage
+
+      - name: Subir informe de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-node${{ matrix.node-version }}
+          path: coverage/
+          retention-days: 7
+
+      - name: Publicar cobertura en Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  # ===========================================================================
+  # JOB 3: SEGURIDAD (aquí es donde tu enfoque DevSecOps entra en el pipeline)
+  # ===========================================================================
+  security:
+    name: Análisis de seguridad
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # --- SCA: dependencias vulnerables ---
+      - name: npm audit (vulnerabilidades conocidas)
+        run: npm audit --audit-level=high
+        continue-on-error: true    # no bloquea el pipeline, pero deja constancia
+
+      - name: Dependency Review (solo en PRs)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+
+      # --- SAST: análisis estático de código ---
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - name: Ejecutar análisis CodeQL
+        uses: github/codeql-action/analyze@v3
+
+      # --- Detección de secretos filtrados en el repo ---
+      - name: Escaneo de secretos (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # JOB 4: BUILD - Construcción de la imagen Docker
+  # ===========================================================================
+  build:
+    name: Build & Push imagen Docker
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login en el registro de contenedores
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extraer metadatos (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build y push de la imagen
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # JOB 5: DEPLOY STAGING - Entorno intermedio, sin aprobación manual
+  # ===========================================================================
+  deploy-staging:
+    name: Deploy a Staging
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: staging
+      url: https://staging.miapp.ejemplo.com
+    steps:
+      - name: Desplegar en staging
+        run: echo "Aquí iría el comando real: kubectl, terraform, ssh, etc."
+
+  # ===========================================================================
+  # JOB 6: DEPLOY PRODUCTION - Requiere aprobación manual (protection rules)
+  # ===========================================================================
+  deploy-production:
+    name: Deploy a Producción
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production      # el "environment protection rule" se configura
+      url: https://miapp.ejemplo.com   # en Settings > Environments del repo,
+    steps:                              # ahí se añaden los aprobadores obligatorios
+      - name: Desplegar en producción
+        run: echo "Despliegue real a producción"
+
+  # ===========================================================================
+  # JOB 7: NOTIFICACIÓN - Avisos en caso de fallo
+  # ===========================================================================
+  notify:
+    name: Notificar resultado
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+    steps:
+      - name: Notificar a Slack
+        if: failure()
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {"text": "❌ Pipeline falló en ${{ github.repository }} (${{ github.ref }})"}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
