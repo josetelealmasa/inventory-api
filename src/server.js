@@ -10,5 +10,6 @@ const app = buildApp({ productController });
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
+  // Hola mundo
   console.log(`Salutia Inventory API escuchando en http://localhost:${PORT}`);
 });
